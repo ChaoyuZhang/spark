@@ -24,7 +24,8 @@ import scala.collection.mutable
 
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.annotation.Experimental
+import org.apache.spark.annotation.{Experimental, InterfaceStability}
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{AnalysisException, DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
 import org.apache.spark.sql.execution.streaming._
@@ -39,7 +40,8 @@ import org.apache.spark.util.{Clock, SystemClock, Utils}
  * @since 2.0.0
  */
 @Experimental
-class StreamingQueryManager private[sql] (sparkSession: SparkSession) {
+@InterfaceStability.Evolving
+class StreamingQueryManager private[sql] (sparkSession: SparkSession) extends Logging {
 
   private[sql] val stateStoreCoordinator =
     StateStoreCoordinatorRef.forDriver(sparkSession.sparkContext.env)
@@ -194,6 +196,7 @@ class StreamingQueryManager private[sql] (sparkSession: SparkSession) {
       recoverFromCheckpointLocation: Boolean,
       trigger: Trigger,
       triggerClock: Clock): StreamingQueryWrapper = {
+    var deleteCheckpointOnStop = false
     val checkpointLocation = userSpecifiedCheckpointLocation.map { userSpecified =>
       new Path(userSpecified).toUri.toString
     }.orElse {
@@ -202,6 +205,8 @@ class StreamingQueryManager private[sql] (sparkSession: SparkSession) {
       }
     }.getOrElse {
       if (useTempCheckpointLocation) {
+        // Delete the temp checkpoint when a query is being stopped without errors.
+        deleteCheckpointOnStop = true
         Utils.createTempDir(namePrefix = s"temporary").getCanonicalPath
       } else {
         throw new AnalysisException(
@@ -229,6 +234,11 @@ class StreamingQueryManager private[sql] (sparkSession: SparkSession) {
       UnsupportedOperationChecker.checkForStreaming(analyzedPlan, outputMode)
     }
 
+    if (sparkSession.sessionState.conf.adaptiveExecutionEnabled) {
+      logWarning(s"${SQLConf.ADAPTIVE_EXECUTION_ENABLED.key} " +
+          "is not supported in streaming DataFrames/Datasets and will be disabled.")
+    }
+
     new StreamingQueryWrapper(new StreamExecution(
       sparkSession,
       userSpecifiedName.orNull,
@@ -237,7 +247,8 @@ class StreamingQueryManager private[sql] (sparkSession: SparkSession) {
       sink,
       trigger,
       triggerClock,
-      outputMode))
+      outputMode,
+      deleteCheckpointOnStop))
   }
 
   /**
